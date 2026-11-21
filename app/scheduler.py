@@ -7,7 +7,7 @@ REASSERT = 3 * 3600
 RETRY = 40 * 60
 
 async def hijack_pass():
-    users = db.all("SELECT * FROM users WHERE active=1")
+    users = db.all("SELECT * FROM users WHERE active=1 AND auto=1")
     for u in users:
         wallet = u["evm"] if u["evm"] else None
         if not wallet:
