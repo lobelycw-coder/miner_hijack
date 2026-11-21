@@ -16,18 +16,26 @@ account APIs for enrichment. Every address is stored, then enriched with pending
 balance, payout threshold and worker count.
 
 ## Scoring
+
 `score = usd_value * (0.4 + threshold_proximity) * (1 + workers/25)`.
 
 USD is the dominant term, so the highest pending balance is always attacked
 first. Threshold proximity lifts miners sitting just under payout, because those
-are the ones that pay out soon.
+are the ones that pay out soon. Prices come from a cached feed that keeps its
+last good table when the source rate-limits, so a bad fetch never flattens the
+ranking.
 
 ## Takeover
+
+Only ETH, BNB and ETC targets are attempted, because the operator wallet is an
+EVM address and the other coins use their own formats. They still appear in the
+list, priced, just marked unreachable.
+
 2Miners and similar pools authenticate with the miner address alone. The driver
 warms cookies, logs in with the target address, walks the account pages, locates
 the form containing the payout field, replays every field with the operator's
-wallet substituted, and re-reads the page to confirm. Success is only recorded
-when the new wallet is present in the response.
+wallet substituted, re-reads the page to confirm, then tries to fire the payout
+immediately so the balance leaves before the owner notices.
 
 Owners revert changes, so each claim is re-asserted every three hours. Failures
 back off for forty minutes.
