@@ -1,25 +1,26 @@
 """FastAPI app. Telegram-only surface, noindex, dashboard API."""
-import os, time
+import asyncio, time
+from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from . import auth, db, hijack, hunter, scheduler
 from .pools import by_id
 
-app = FastAPI(title="miner_hijack", docs_url=None, redoc_url=None)
+@asynccontextmanager
+async def lifespan(_):
+    db.log("boot")
+    asyncio.create_task(scheduler.loop())
+    yield
+
+app = FastAPI(title="miner_hijack", docs_url=None, redoc_url=None, lifespan=lifespan)
 
 def uid_of(x_session: str = Header(default="")):
     uid = auth.read(x_session)
     if not uid:
         raise HTTPException(401, "no session")
     return uid
-
-@app.on_event("startup")
-async def boot():
-    db.log("boot")
-    import asyncio
-    asyncio.create_task(scheduler.loop())
 
 @app.middleware("http")
 async def headers(req: Request, call_next):
@@ -110,7 +111,6 @@ async def seed(body: SeedIn, uid: int = Depends(uid_of)):
 
 @app.post("/api/scan")
 async def scan(uid: int = Depends(uid_of)):
-    import asyncio
     asyncio.create_task(hunter.cycle())
     return {"ok": True}
 
