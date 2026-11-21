@@ -1,4 +1,4 @@
-app = "miner-scroof"
+app = "miner-hijack"
 primary_region = "fra"
 
 [build]
