@@ -2,6 +2,8 @@
 import asyncio, random, time
 from . import db, hijack
 from .pools import by_id, takeoverable
+from app import commands
+dp.include_router(commands.router)
 
 INTERVAL = 45
 REASSERT_FAST = 20 * 60
