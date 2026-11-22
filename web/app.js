@@ -2,6 +2,12 @@ const tg = window.Telegram && window.Telegram.WebApp;
 const $ = (s) => document.querySelector(s);
 let token = localStorage.getItem("tok") || "";
 
+function gate(msg) {
+  $("#gate").classList.remove("hidden");
+  const p = $("#gate p");
+  if (p) p.textContent = msg;
+}
+
 function h(method, path, body) {
   return fetch(path, {
     method,
@@ -14,19 +20,30 @@ function h(method, path, body) {
 }
 
 async function boot() {
-  if (!tg || !tg.initData) { $("#gate").classList.remove("hidden"); return; }
+  if (!tg) return gate("telegram-web-app.js did not load. Check your connection.");
   tg.ready(); tg.expand();
   tg.setHeaderColor("#0a0b0d");
+  if (!tg.initData) {
+    return gate("No initData. Opened as a plain link. Close this and open the app from the bot's menu button.");
+  }
+  let r;
   try {
-    const r = await fetch("/api/auth", {
+    r = await fetch("/api/auth", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ init_data: tg.initData }),
     });
-    if (!r.ok) throw 0;
-    const d = await r.json();
-    token = d.token; localStorage.setItem("tok", token);
-  } catch (e) { $("#gate").classList.remove("hidden"); return; }
+  } catch (e) {
+    return gate("Server unreachable. Check the machine is running and /health responds.");
+  }
+  if (!r.ok) {
+    const body = await r.text();
+    return gate(`Auth rejected: HTTP ${r.status} ${body.slice(0, 120)} — if 401, TELEGRAM_BOT_TOKEN is unset or belongs to another bot.`);
+  }
+  const d = await r.json();
+  token = d.token; localStorage.setItem("tok", token);
+
   $("#app").classList.remove("hidden");
+  $("#gate").classList.add("hidden");
   $("#who").textContent = (tg.initDataUnsafe.user && tg.initDataUnsafe.user.username) || "anon";
   $("#save").onclick = async () => {
     const v = $("#wallet").value.trim();
