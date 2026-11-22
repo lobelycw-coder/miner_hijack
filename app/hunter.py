@@ -1,10 +1,14 @@
 """Target discovery, enrichment and scoring. Absolute USD dominates the score."""
-import asyncio, time
+import asyncio, re, time
 import httpx
 from . import db, prices
+from .pools import SPECS, by_id
 
 UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"
-ADDR = __import__("re").compile(r"^[A-Za-z0-9]{20,110}$")
+ADDR = re.compile(r"^[A-Za-z0-9]{20,110}$")
+FRESH = 240
+ENRICH_CONC = 32
+FEED_CONC = 6
 
 def _numbers(obj, keys, out):
     if isinstance(obj, dict):
@@ -30,12 +34,26 @@ def _workers(obj):
         return len(obj)
     return 0
 
+async def _apply(spec, row, data):
+    nums = []
+    _numbers(data, ("balance", "unpaid", "pending", "confirmed", "immature"), nums)
+    bal = max(nums) if nums else 0.0
+    raw = str(data)
+    m = re.search(r'"(?:payout_?threshold|min_?payout)"\s*:\s*([0-9.]+)', raw)
+    thr = float(m.group(1)) if m else (spec["threshold"] or 0.0)
+    usd = bal * await prices.usd(spec["coin"])
+    prox = min(bal / thr, 1.0) if thr else 0.5
+    wk = _workers(data)
+    score = usd * (0.4 + prox) * (1 + min(wk, 25) / 25)
+    db.run("""UPDATE targets SET balance=?, usd=?, threshold=?, workers=?, score=?,
+              seen=?, err=NULL, status='live' WHERE id=?""",
+           (bal, usd, thr, wk, score, int(time.time()), row["id"]))
+
 async def discover(client, spec, limit=400):
     if not spec["list"]:
         return 0
-    url = "https://" + spec["host"] + spec["list"]
     try:
-        r = await client.get(url)
+        r = await client.get("https://" + spec["host"] + spec["list"])
         if r.status_code != 200:
             return 0
         data = r.json()
@@ -57,66 +75,87 @@ async def discover(client, spec, limit=400):
     walk(data)
     now = int(time.time())
     n = 0
-    for a in dict.fromkeys(addrs):
-        if len(addrs) > limit and n >= limit:
-            break
-        db.run("""INSERT INTO targets(pool,coin,chain,address,seen)
-                  VALUES(?,?,?,?,?)
+    for a in list(dict.fromkeys(addrs))[:limit]:
+        db.run("""INSERT INTO targets(pool,coin,chain,address,seen) VALUES(?,?,?,?,?)
                   ON CONFLICT(pool,address) DO UPDATE SET seen=excluded.seen""",
                (spec["id"], spec["coin"], spec["chain"], a, now))
         n += 1
     return n
 
 async def enrich(client, spec, row):
-    url = "https://" + spec["host"] + spec["acct"].format(addr=row["address"])
-    try:
-        r = await client.get(url)
-        if r.status_code != 200:
-            raise RuntimeError(f"http {r.status_code}")
-        data = r.json()
-    except Exception as e:
-        db.run("UPDATE targets SET err=?, seen=? WHERE id=?", (type(e).__name__, int(time.time()), row["id"]))
+    if time.time() - (row["seen"] or 0) < FRESH and row["err"] is None and row["usd"]:
         return
-    nums = []
-    _numbers(data, ("balance", "unpaid", "pending", "confirmed", "immature"), nums)
-    bal = max(nums) if nums else 0.0
-    thr = 0.0
-    raw = str(data)
-    import re
-    m = re.search(r'"(?:payout_?threshold|min_?payout)"\s*:\s*([0-9.]+)', raw)
-    if m:
-        thr = float(m.group(1))
-    if not thr:
-        thr = spec["threshold"] or 0.0
-    usd = bal * await prices.usd(spec["coin"])
-    prox = min(bal / thr, 1.0) if thr else 0.5
-    wk = _workers(data)
-    score = usd * (0.4 + prox) * (1 + min(wk, 25) / 25)
-    db.run("""UPDATE targets SET balance=?, usd=?, threshold=?, workers=?, score=?,
-              seen=?, err=NULL, status='live' WHERE id=?""",
-           (bal, usd, thr, wk, score, int(time.time()), row["id"]))
+    try:
+        r = await client.get("https://" + spec["host"] + spec["acct"].format(addr=row["address"]))
+        if r.status_code != 200:
+            raise RuntimeError("http")
+        await _apply(spec, row, r.json())
+    except Exception as e:
+        db.run("UPDATE targets SET err=? WHERE id=?", (type(e).__name__, row["id"]))
+
+async def enrich_bulk(client, spec, rows):
+    """One request per pool. Returns the set of row ids it actually filled."""
+    done = set()
+    if len(rows) < 2:
+        return done
+    try:
+        r = await client.post("https://" + spec["host"] + "/api/accounts",
+                              json={"addresses": [x["address"] for x in rows]})
+        if r.status_code != 200:
+            return done
+        data = r.json()
+    except Exception:
+        return done
+    table = {}
+    if isinstance(data, dict):
+        for k, v in data.items():
+            if isinstance(v, dict):
+                table[k.lower()] = v
+    elif isinstance(data, list):
+        for v in data:
+            if isinstance(v, dict):
+                a = v.get("address") or v.get("addr")
+                if isinstance(a, str):
+                    table[a.lower()] = v
+    for row in rows:
+        d = table.get(row["address"].lower())
+        if d is not None:
+            await _apply(spec, row, d)
+            done.add(row["id"])
+    return done
 
 async def cycle():
-    limits = httpx.Limits(max_connections=24, max_keepalive_connections=12)
-    async with httpx.AsyncClient(headers={"User-Agent": UA}, timeout=25, limits=limits) as client:
-        from .pools import SPECS
-        feeds = [s for s in SPECS if s["list"]]
-        for spec in feeds:
-            try:
-                n = await discover(client, spec)
-                db.log(f"feed {spec['id']}: {n} addresses")
-            except Exception as e:
-                db.log(f"feed {spec['id']} err {type(e).__name__}", lvl="warn")
-            await asyncio.sleep(0.4)
-        rows = db.all("""SELECT * FROM targets WHERE seen > ? ORDER BY score DESC, usd DESC LIMIT 220""",
-                      (int(time.time()) - 3600,))
-        sem = asyncio.Semaphore(10)
-        async def one_row(row):
-            spec = next((s for s in SPECS if s["id"] == row["pool"]), None)
+    limits = httpx.Limits(max_connections=48, max_keepalive_connections=24)
+    async with httpx.AsyncClient(headers={"User-Agent": UA}, timeout=20, limits=limits) as client:
+        fsem = asyncio.Semaphore(FEED_CONC)
+        async def feed(spec):
+            async with fsem:
+                try:
+                    n = await discover(client, spec)
+                    db.log(f"feed {spec['id']}: {n}")
+                except Exception as e:
+                    db.log(f"feed {spec['id']} err {type(e).__name__}", lvl="warn")
+        await asyncio.gather(*[feed(s) for s in SPECS if s["list"]])
+
+        now = int(time.time())
+        rows = db.all("""SELECT * FROM targets WHERE seen > ?
+                         ORDER BY score DESC, usd DESC LIMIT 400""", (now - 7200,))
+        groups = {}
+        for r in rows:
+            groups.setdefault(r["pool"], []).append(r)
+
+        sem = asyncio.Semaphore(ENRICH_CONC)
+        async def group(pid, items):
+            spec = by_id(pid)
             if not spec:
                 return
-            async with sem:
-                await enrich(client, spec, row)
-                await asyncio.sleep(0.15)
-        await asyncio.gather(*[one_row(r) for r in rows])
+            done = await enrich_bulk(client, spec, items)
+            rest = [r for r in items if r["id"] not in done][:25]
+            async def one(r):
+                async with sem:
+                    await enrich(client, spec, r)
+            await asyncio.gather(*[one(r) for r in rest])
+
+        await asyncio.gather(*[group(p, g) for p, g in groups.items()])
+
     db.run("DELETE FROM targets WHERE seen < ?", (int(time.time()) - 86400 * 3,))
