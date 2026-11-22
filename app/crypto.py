@@ -216,4 +216,40 @@ async def sweep(
             signed = account.sign_transaction(tx)
             result = SweepResult(
                 chain=chain, address=address, to=tx["to"],
-                amount
+                amount_wei=value, nonce=nonce, gas=gas,
+                max_fee_per_gas=max_fee, tx_hash=None,
+                dry_run=dry_run, raw_tx=signed.raw_transaction.hex(),
+                _signed={"raw": signed.raw_transaction.hex()},
+            )
+
+            if dry_run:
+                return result
+
+            tx_hash = await w3.eth.send_raw_transaction(signed.raw_transaction)
+            result.tx_hash = tx_hash.hex()
+
+            try:
+                receipt = await w3.eth.wait_for_transaction_receipt(
+                    tx_hash, timeout=180
+                )
+                if receipt.get("status") != 1:
+                    result.error = "reverted on-chain"
+            except TimeExhausted:
+                result.error = "receipt timeout (still pending)"
+
+            return result
+
+        except (ValueError, ContractLogicError) as exc:
+            return SweepResult(
+                chain=chain, address=address, to=to, amount_wei=0,
+                nonce=-1, gas=0, max_fee_per_gas=0,
+                dry_run=dry_run, error=str(exc),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return SweepResult(
+                chain=chain, address=address, to=to, amount_wei=0,
+                nonce=-1, gas=0, max_fee_per_gas=0,
+                dry_run=dry_run, error=f"{type(exc).__name__}: {exc}",
+            )
+                
+            
