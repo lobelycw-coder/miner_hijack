@@ -1,5 +1,5 @@
 """FastAPI app. Telegram-only surface, noindex, dashboard API."""
-import asyncio, time
+import asyncio, os, time
 from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, PlainTextResponse
@@ -28,6 +28,20 @@ async def headers(req: Request, call_next):
     r.headers["X-Robots-Tag"] = "noindex, nofollow, noarchive"
     r.headers["Referrer-Policy"] = "no-referrer"
     return r
+
+@app.get("/api/diag")
+async def diag():
+    """Public. Reveals nothing secret: the bot id is the public half of the token."""
+    return {
+        "now": int(time.time()),
+        "token_set": bool(auth.BOT),
+        "token_len": len(auth.BOT),
+        "bot_id": auth.BOT.split(":")[0] if ":" in auth.BOT else "",
+        "secret_set": bool(os.environ.get("APP_SECRET")),
+        "db_ok": True,
+        "users": db.one("SELECT COUNT(*) c FROM users")["c"],
+        "targets": db.one("SELECT COUNT(*) c FROM targets")["c"],
+    }
 
 @app.get("/health")
 async def health():
