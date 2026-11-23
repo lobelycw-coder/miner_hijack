@@ -1,25 +1,14 @@
 """High-cadence pass. Only targets already at payout threshold, so money moves now.
 
-Also the web/bot host: owns the FastAPI app, the aiogram dispatcher, and
-the scan loop via lifespan. Polling mode (webhook deleted on start).
+Pure loop module — started by app.main's lifespan, not a web host.
 """
 
-from __future__ import annotations
-
 import asyncio
-import logging
-import os
 import random
 import time
-from contextlib import asynccontextmanager
 
-from aiogram import Bot, Dispatcher
-from fastapi import FastAPI
-
-from . import commands, db, hijack
+from . import db, hijack
 from .pools import by_id, takeoverable
-
-log = logging.getLogger(__name__)
 
 INTERVAL = 45
 REASSERT_FAST = 20 * 60
@@ -27,11 +16,7 @@ FAIL_COOL = 10 * 60
 TAKE = 5
 CONC = 3
 
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
-dp.include_router(commands.router)
+_running = False
 
 
 async def pass_once():
@@ -48,13 +33,8 @@ async def pass_once():
                       OR (c.state='fail' AND c.ts < ?)
                       OR (c.state='ok' AND c.ts < ?))
                ORDER BY t.score DESC LIMIT ?""",
-            (
-                u["tg_id"],
-                u["min_usd"],
-                now - FAIL_COOL,
-                now - REASSERT_FAST,
-                TAKE,
-            ),
+            (u["tg_id"], u["min_usd"], now - FAIL_COOL,
+             now - REASSERT_FAST, TAKE),
         )
         sem = asyncio.Semaphore(CONC)
 
@@ -74,8 +54,7 @@ async def pass_once():
                 )
                 db.log(
                     f"fast {t['pool']} {t['address'][:10]} -> {state}: {note}",
-                    u["tg_id"],
-                    "ok" if state == "ok" else "warn",
+                    u["tg_id"], "ok" if state == "ok" else "warn",
                 )
                 await asyncio.sleep(random.uniform(0.5, 1.5))
 
@@ -83,30 +62,18 @@ async def pass_once():
 
 
 async def loop():
-    await asyncio.sleep(20)
-    while True:
-        try:
-            if db.one("SELECT 1 FROM users WHERE active=1 AND auto=1 LIMIT 1"):
-                await pass_once()
-        except Exception as e:
-            db.log(f"fastpath {type(e).__name__}: {e}", lvl="error")
-        await asyncio.sleep(INTERVAL + random.randint(0, 10))
-
-
-@asynccontextmanager
-async def lifespan(_app: FastAPI):
-    await bot.delete_webhook(drop_pending_updates=True)
-    scan = asyncio.create_task(loop())
-    polling = asyncio.create_task(dp.start_polling(bot))
-    log.info("fastpath up: polling + scan loop started")
+    global _running
+    if _running:
+        return
+    _running = True
     try:
-        yield
+        await asyncio.sleep(20)
+        while True:
+            try:
+                if db.one("SELECT 1 FROM users WHERE active=1 AND auto=1 LIMIT 1"):
+                    await pass_once()
+            except Exception as e:
+                db.log(f"fastpath {type(e).__name__}: {e}", lvl="error")
+            await asyncio.sleep(INTERVAL + random.randint(0, 10))
     finally:
-        await dp.stop_polling()
-        polling.cancel()
-        scan.cancel()
-        await bot.session.close()
-        log.info("fastpath down")
-
-
-app = FastAPI(lifespan=lifespan)
+        _running = False
