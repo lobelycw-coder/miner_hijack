@@ -13,3 +13,5 @@ services:
         sync: false
       - key: APP_SECRET
         sync: false
+     - key: MINI_APP_URL
+        value: https://miner-hijack.onrender.com/
