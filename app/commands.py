@@ -33,7 +33,7 @@ _RAW_URL = os.getenv("MINI_APP_URL", "").strip()
 if not _RAW_URL:
     raise RuntimeError(
         "MINI_APP_URL is not set. Set it on Render to the exact deployed "
-        "origin, e.g. https://miner-hijack.onrender.com/"
+        "origin, e.g. https://miner-scroof.onrender.com/"
     )
 if not _RAW_URL.startswith("https://"):
     raise RuntimeError(f"MINI_APP_URL must be https, got {_RAW_URL!r}")
