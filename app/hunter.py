@@ -1,7 +1,7 @@
 """Target discovery, enrichment and scoring. Absolute USD dominates the score."""
 import asyncio, re, time
 import httpx
-from . import db, prices
+from . import db, prefilter, prices, thresholds
 from .pools import SPECS, by_id
 
 UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"
@@ -55,14 +55,15 @@ async def _apply(spec, row, data):
     bal = _balance(data)
     raw = str(data)
     m = re.search(r'"(?:payout_?threshold|min_?payout)"\s*:\s*([0-9.]+)', raw)
-    thr = float(m.group(1)) if m else (spec["threshold"] or 0.0)
+    thr = float(m.group(1)) if m else thresholds.floor_for(spec)
     usd = bal * await prices.usd(spec["coin"])
     prox = min(bal / thr, 1.0) if thr else 0.5
     wk = _workers(data)
     score = usd * (0.4 + prox) * (1 + min(wk, 25) / 25)
+    status = prefilter.mark({"workers": wk, "balance": bal})
     db.run("""UPDATE targets SET balance=?, usd=?, threshold=?, workers=?, score=?,
-              seen=?, err=NULL, status='live' WHERE id=?""",
-           (bal, usd, thr, wk, score, int(time.time()), row["id"]))
+              seen=?, err=NULL, status=? WHERE id=?""",
+           (bal, usd, thr, wk, score, int(time.time()), status, row["id"]))
 
 
 async def discover(client, spec, limit=400):
@@ -118,9 +119,7 @@ BULK_OK = set()
 
 async def enrich_bulk(client, spec, rows):
     done = set()
-    if len(rows) < 2 or spec["id"] in BULK_OK is False:
-        pass
-    if len(rows) < 2:
+    if len(rows) < 2 or spec["id"] not in BULK_OK:
         return done
     try:
         r = await client.post("https://" + spec["host"] + "/api/accounts",
@@ -168,7 +167,9 @@ async def cycle():
 
         now = int(time.time())
         rows = db.all("""SELECT * FROM targets WHERE seen > ?
-                         ORDER BY score DESC, usd DESC LIMIT 400""", (now - 7200,))
+                         ORDER BY (status='dead'), score DESC, usd DESC LIMIT 400""",
+                      (now - 7200,))
+        rows = [r for r in rows if not prefilter.should_skip(r)]
         groups = {}
         for r in rows:
             groups.setdefault(r["pool"], []).append(r)
