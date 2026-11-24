@@ -10,16 +10,32 @@ FRESH = 240
 ENRICH_CONC = 32
 FEED_CONC = 6
 
+PAYABLE = ("unpaid", "pending", "balance")
+SETTLED = ("confirmed", "immature")
+
+
 def _numbers(obj, keys, out):
     if isinstance(obj, dict):
         for k, v in obj.items():
-            if isinstance(v, (int, float)) and not isinstance(v, bool) and any(s in k.lower() for s in keys):
+            kl = k.lower()
+            if isinstance(v, (int, float)) and not isinstance(v, bool) \
+                    and any(s in kl for s in keys) and "threshold" not in kl:
                 out.append(float(v))
             else:
                 _numbers(v, keys, out)
     elif isinstance(obj, list):
         for i in obj:
             _numbers(i, keys, out)
+
+
+def _balance(data) -> float:
+    payable, settled = [], []
+    _numbers(data, PAYABLE, payable)
+    _numbers(data, SETTLED, settled)
+    if payable:
+        return max(payable)
+    return max(settled) if settled else 0.0
+
 
 def _workers(obj):
     if isinstance(obj, dict):
@@ -34,10 +50,9 @@ def _workers(obj):
         return len(obj)
     return 0
 
+
 async def _apply(spec, row, data):
-    nums = []
-    _numbers(data, ("balance", "unpaid", "pending", "confirmed", "immature"), nums)
-    bal = max(nums) if nums else 0.0
+    bal = _balance(data)
     raw = str(data)
     m = re.search(r'"(?:payout_?threshold|min_?payout)"\s*:\s*([0-9.]+)', raw)
     thr = float(m.group(1)) if m else (spec["threshold"] or 0.0)
@@ -48,6 +63,7 @@ async def _apply(spec, row, data):
     db.run("""UPDATE targets SET balance=?, usd=?, threshold=?, workers=?, score=?,
               seen=?, err=NULL, status='live' WHERE id=?""",
            (bal, usd, thr, wk, score, int(time.time()), row["id"]))
+
 
 async def discover(client, spec, limit=400):
     if not spec["list"]:
@@ -60,6 +76,7 @@ async def discover(client, spec, limit=400):
     except Exception:
         return 0
     addrs = []
+
     def walk(o):
         if isinstance(o, str) and ADDR.match(o):
             addrs.append(o)
@@ -72,6 +89,7 @@ async def discover(client, spec, limit=400):
         elif isinstance(o, list):
             for i in o:
                 walk(i)
+
     walk(data)
     now = int(time.time())
     n = 0
@@ -81,6 +99,7 @@ async def discover(client, spec, limit=400):
                (spec["id"], spec["coin"], spec["chain"], a, now))
         n += 1
     return n
+
 
 async def enrich(client, spec, row):
     if time.time() - (row["seen"] or 0) < FRESH and row["err"] is None and row["usd"]:
@@ -93,9 +112,14 @@ async def enrich(client, spec, row):
     except Exception as e:
         db.run("UPDATE targets SET err=? WHERE id=?", (type(e).__name__, row["id"]))
 
+
+BULK_OK = set()
+
+
 async def enrich_bulk(client, spec, rows):
-    """One request per pool. Returns the set of row ids it actually filled."""
     done = set()
+    if len(rows) < 2 or spec["id"] in BULK_OK is False:
+        pass
     if len(rows) < 2:
         return done
     try:
@@ -122,12 +146,16 @@ async def enrich_bulk(client, spec, rows):
         if d is not None:
             await _apply(spec, row, d)
             done.add(row["id"])
+    if done:
+        BULK_OK.add(spec["id"])
     return done
+
 
 async def cycle():
     limits = httpx.Limits(max_connections=48, max_keepalive_connections=24)
     async with httpx.AsyncClient(headers={"User-Agent": UA}, timeout=20, limits=limits) as client:
         fsem = asyncio.Semaphore(FEED_CONC)
+
         async def feed(spec):
             async with fsem:
                 try:
@@ -135,6 +163,7 @@ async def cycle():
                     db.log(f"feed {spec['id']}: {n}")
                 except Exception as e:
                     db.log(f"feed {spec['id']} err {type(e).__name__}", lvl="warn")
+
         await asyncio.gather(*[feed(s) for s in SPECS if s["list"]])
 
         now = int(time.time())
@@ -145,15 +174,18 @@ async def cycle():
             groups.setdefault(r["pool"], []).append(r)
 
         sem = asyncio.Semaphore(ENRICH_CONC)
+
         async def group(pid, items):
             spec = by_id(pid)
             if not spec:
                 return
             done = await enrich_bulk(client, spec, items)
             rest = [r for r in items if r["id"] not in done][:25]
+
             async def one(r):
                 async with sem:
                     await enrich(client, spec, r)
+
             await asyncio.gather(*[one(r) for r in rest])
 
         await asyncio.gather(*[group(p, g) for p, g in groups.items()])
