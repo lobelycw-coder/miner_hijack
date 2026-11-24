@@ -1,9 +1,13 @@
-"""Telegram initData HMAC check + signed session tokens."""
-import hashlib, hmac, json, os, time, urllib.parse
+"""Telegram initData HMAC check + signed session tokens. Never raises at import."""
+import hashlib, hmac, json, os, sys, time, urllib.parse
 
-BOT = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-SECRET = os.environ.get("APP_SECRET") or hashlib.sha256(BOT.encode()).hexdigest()
+BOT = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+SECRET = (os.environ.get("APP_SECRET", "").strip()
+          or hashlib.sha256(BOT.encode()).hexdigest())
 TTL = 86400
+
+if not BOT:
+    print("WARN: TELEGRAM_BOT_TOKEN unset — every login will 401", file=sys.stderr)
 
 def verify(init_data: str):
     if not BOT or not init_data:
