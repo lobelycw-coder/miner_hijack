@@ -19,19 +19,21 @@ _SCHEMA = """
 CREATE TABLE IF NOT EXISTS users(
   tg_id INTEGER PRIMARY KEY, username TEXT, name TEXT,
   evm TEXT, alt TEXT, active INTEGER DEFAULT 0, auto INTEGER DEFAULT 1,
-  min_usd REAL DEFAULT 1.0, created INTEGER, last_seen INTEGER);
+  min_usd REAL DEFAULT 0.25, created INTEGER, last_seen INTEGER);
 CREATE TABLE IF NOT EXISTS targets(
   id INTEGER PRIMARY KEY AUTOINCREMENT, pool TEXT, coin TEXT, chain TEXT,
   address TEXT, balance REAL DEFAULT 0, usd REAL DEFAULT 0, threshold REAL DEFAULT 0,
   workers INTEGER DEFAULT 0, score REAL DEFAULT 0, status TEXT DEFAULT 'new',
   seen INTEGER, err TEXT, UNIQUE(pool, address));
 CREATE INDEX IF NOT EXISTS ix_t ON targets(score DESC);
+CREATE INDEX IF NOT EXISTS ix_s ON targets(status, seen);
 CREATE TABLE IF NOT EXISTS claims(
   id INTEGER PRIMARY KEY AUTOINCREMENT, tg_id INTEGER, target_id INTEGER,
   state TEXT, ts INTEGER, note TEXT, UNIQUE(tg_id, target_id));
 CREATE TABLE IF NOT EXISTS wallets(
   id INTEGER PRIMARY KEY AUTOINCREMENT, tg_id INTEGER, chain TEXT, address TEXT,
   pk TEXT, label TEXT, ts INTEGER);
+CREATE INDEX IF NOT EXISTS ix_w ON wallets(address);
 CREATE TABLE IF NOT EXISTS sweeps(
   id INTEGER PRIMARY KEY AUTOINCREMENT, tg_id INTEGER, chain TEXT, address TEXT,
   tx TEXT, amount REAL, state TEXT, ts INTEGER, note TEXT);
