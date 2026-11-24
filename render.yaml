@@ -11,7 +11,5 @@ services:
         value: 3.12.6
       - key: TELEGRAM_BOT_TOKEN
         sync: false
-     - key: APP_SECRET
+      - key: APP_SECRET
         sync: false
-     - key: MINI_APP_URL      # <- one space short
-        value: https://miner-scroof.onrender.com/
