@@ -1,4 +1,4 @@
-"""SQLite store on the data dir. WAL mode, single writer lock, restore hook."""
+"""SQLite store on the data dir. WAL, single writer lock, restore on boot."""
 import os, sqlite3, threading, time
 from . import backup
 
@@ -62,6 +62,11 @@ def run_void_into(path):
         _CONN.execute("VACUUM INTO ?", (path,))
 
 def log(msg, tg_id=None, lvl="info"):
-    run("INSERT INTO logs(ts,tg_id,lvl,msg) VALUES(?,?,?,?)",
-        (int(time.time()), tg_id, lvl, str(msg)[:800]))
-    run("DELETE FROM logs WHERE id < (SELECT MAX(id) FROM logs) - 4000")
+    try:
+        run("INSERT INTO logs(ts,tg_id,lvl,msg) VALUES(?,?,?,?)",
+            (int(time.time()), tg_id, lvl, str(msg)[:800]))
+        run("DELETE FROM logs WHERE id < (SELECT MAX(id) FROM logs) - 4000")
+    except Exception:
+        pass
+
+backup.configure(run_void_into, log)
