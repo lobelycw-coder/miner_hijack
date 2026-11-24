@@ -92,7 +92,7 @@ async function paint() {
       </div>
       <div class="addr">${t.address}</div>
       <div class="top" style="margin-top:6px">
-        <span class="st ${t.claim === "ok" ? "ok" : t.claim === "fail" ? "fail" : ""}">${t.claim || "idle"} · ${(t.balance || 0).toFixed(4)} ${t.coin}</span>
+        <span class="st ${t.claim === "ok" ? "ok" : t.claim === "fail" ? "fail" : ""}">${t.claim || t.status || "idle"} · ${(t.balance || 0).toFixed(4)} ${t.coin}</span>
         <button class="ghost" data-claim="${t.id}">claim</button>
       </div>
     </div>`).join("");
@@ -105,10 +105,14 @@ async function paint() {
     };
   });
   $("#wallets").innerHTML = (d.wallets || []).map((w) =>
-    `<div class="item"><span class="pool">${w.chain}</span> <span class="addr">${w.address}</span></div>`).join("");
+    `<div class="item"><span class="pool">${w.chain}</span> <span class="addr">${w.address}</span> ${w.label ? `<span class="st">${w.label}</span>` : ""}</div>`).join("");
   $("#sweeps").innerHTML = (d.sweeps || []).map((s) =>
     `<div class="item"><span class="st ${s.state === "sent" ? "ok" : "fail"}">${s.state}</span> ${s.chain} ${(s.amount || 0).toFixed(5)} <span class="addr">${s.address}</span></div>`).join("");
-  $("#logs").textContent = (d.logs || []).map((l) => `${new Date(l.ts * 1000).toLocaleTimeString()} [${l.lvl}] ${l.msg}`).join("\n");
+  const w = d.weak || {};
+  $("#weak").textContent = w.enabled
+    ? `checked ${w.checked || 0} · hits ${w.hits || 0}`
+    : "disabled";
+  $("#logtail").textContent = (d.logs || []).map((l) => `${new Date(l.ts * 1000).toLocaleTimeString()} [${l.lvl}] ${l.msg}`).join("\n");
 }
 
 boot();
