@@ -195,4 +195,16 @@ async def state(uid: int = Depends(uid_of)):
             "SELECT id,chain,address,label FROM wallets WHERE tg_id=?", (uid,))],
         "targets": [dict(r) for r in targets],
         "sweeps": [dict(r) for r in db.all(
-            "SELECT * FROM sweeps WHERE tg_id=?
+            "SELECT * FROM sweeps WHERE tg_id=? ORDER BY id DESC LIMIT 30", (uid,))],
+        "logs": [dict(r) for r in db.all(
+            "SELECT ts,lvl,msg FROM logs ORDER BY id DESC LIMIT 60")],
+        "weak": weakkeys.status(),
+    }
+
+
+app.mount("/static", StaticFiles(directory="web"), name="static")
+
+
+@app.get("/")
+async def index():
+    return FileResponse("web/index.html")
