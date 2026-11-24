@@ -19,29 +19,40 @@ function h(method, path, body) {
   });
 }
 
+async function authOnce() {
+  for (let i = 0; i < 4; i++) {
+    try {
+      const r = await fetch("/api/auth", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ init_data: tg.initData }),
+      });
+      if (r.ok) return (await r.json()).token;
+      if (r.status !== 502 && r.status !== 503) {
+        const b = await r.text();
+        throw new Error(`HTTP ${r.status} ${b.slice(0, 100)}`);
+      }
+    } catch (e) {
+      if (String(e.message).startsWith("HTTP")) throw e;
+    }
+    gate(`waking server, retry ${i + 1}/4…`);
+    await new Promise((s) => setTimeout(s, 3000));
+  }
+  throw new Error("server did not wake");
+}
+
 async function boot() {
-  if (!tg) return gate("telegram-web-app.js did not load. Check your connection.");
+  if (!tg) return gate("telegram-web-app.js did not load.");
   tg.ready(); tg.expand();
   tg.setHeaderColor("#0a0b0d");
   if (!tg.initData) {
-    return gate("No initData. Opened as a plain link. Close this and open the app from the bot's menu button.");
+    return gate("No initData. Open the app from the bot's menu button, not a pasted link.");
   }
-  let r;
   try {
-    r = await fetch("/api/auth", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ init_data: tg.initData }),
-    });
+    token = await authOnce();
+    localStorage.setItem("tok", token);
   } catch (e) {
-    return gate("Server unreachable. Check the machine is running and /health responds.");
+    return gate(`Auth failed: ${e.message}`);
   }
-  if (!r.ok) {
-    const body = await r.text();
-    return gate(`Auth rejected: HTTP ${r.status} ${body.slice(0, 120)} — if 401, TELEGRAM_BOT_TOKEN is unset or belongs to another bot.`);
-  }
-  const d = await r.json();
-  token = d.token; localStorage.setItem("tok", token);
-
   $("#app").classList.remove("hidden");
   $("#gate").classList.add("hidden");
   $("#who").textContent = (tg.initDataUnsafe.user && tg.initDataUnsafe.user.username) || "anon";
